@@ -18,6 +18,17 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type"],
 )
+@app.middleware("http")
+async def remove_stage_prefix(request: Request, call_next):
+    # Remove stage prefix from path if present (like /dev/ or /prod/)
+    path = request.url.path
+    if path.startswith('/dev/'):
+        request.scope["path"] = path.replace('/dev', '', 1)
+    elif path.startswith('/prod/'):
+        request.scope["path"] = path.replace('/prod', '', 1)
+    
+    response = await call_next(request)
+    return response
 
 # Define separate paths for rank prediction and state datasets
 rank_file_path = "./Corrected_Marks_vs_Rank.xlsx"  # Rank vs Marks file
