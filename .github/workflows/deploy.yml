@@ -22,6 +22,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt -t package/
           cp main.py package/
+          cp -r cleaned_data package/
+          cp Corrected_Marks_vs_Rank.xlsx package/
           cd package && zip -r ../function.zip .
 
       - name: Configure AWS credentials
@@ -31,9 +33,13 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_SECRET }}
           aws-region: us-east-1
 
-      - name: Deploy to AWS Lambda
+      - name: Upload to S3
+        run: |
+          aws s3 cp function.zip s3://mentorboxai/function.zip
+
+      - name: Update Lambda from S3
         run: |
           aws lambda update-function-code \
             --function-name MentorDep \
-            --zip-file fileb://function.zip
-
+            --s3-bucket mentorboxai \
+            --s3-key function.zip
