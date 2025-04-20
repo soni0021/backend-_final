@@ -7,6 +7,7 @@ import pandas as pd
 import os
 import numpy as np
 from mangum import Mangum
+import time
 
 app = FastAPI(title="NEET Rank Predictor API")
 
@@ -159,6 +160,7 @@ def get_states():
 def get_categories(request: StateRequest):
     """Returns unique categories based on selected state dataset."""
     state = request.state
+    start_time = time.time()
     
     print(f"Received request for categories with state: {state}")
     
@@ -195,16 +197,39 @@ def get_categories(request: StateRequest):
             return {"categories": default_categories}
     
     try:
-        df = pd.read_excel(file_path)
+        # Use cached data loading
+        df = load_excel_file(file_path)
         
-        if "category" not in df.columns:
-            print(f"Category column not found in {file_path}. Available columns: {df.columns.tolist()}")
-            # Return default categories if category column not found
+        if df.empty:
+            # Return default categories if dataframe is empty
             default_categories = ["Open", "OBC", "SC", "ST", "EWS"]
             return {"categories": default_categories}
+            
+        if "category" not in df.columns:
+            print(f"Category column not found in {file_path}. Available columns: {df.columns.tolist()}")
+            
+            # Try to find alternative category column
+            alt_category_columns = [col for col in df.columns if "categ" in col.lower() or "type" in col.lower()]
+            
+            if alt_category_columns:
+                category_col = alt_category_columns[0]
+                print(f"Using alternative category column: {category_col}")
+                unique_categories = df[category_col].dropna().unique().tolist()
+                # Capitalize for consistency
+                unique_categories = [c.capitalize() for c in unique_categories if isinstance(c, str)]
+            else:
+                # Return default categories if category column not found
+                default_categories = ["Open", "OBC", "SC", "ST", "EWS"]
+                return {"categories": default_categories}
+        else:
+            unique_categories = df["category"].dropna().unique().tolist()
+            # Capitalize for consistency
+            unique_categories = [c.capitalize() for c in unique_categories if isinstance(c, str)]
         
-        unique_categories = df["category"].dropna().unique().tolist()
         print(f"Found categories: {unique_categories}")
+        end_time = time.time() - start_time
+        print(f"Categories query processed in {end_time:.2f} seconds")
+        
         return {"categories": unique_categories}
         
     except Exception as e:
@@ -214,15 +239,63 @@ def get_categories(request: StateRequest):
         print(f"Returning default categories: {default_categories}")
         return {"categories": default_categories}
 
+# Create Lambda handler with better configuration
+handler = Mangum(app, lifespan="off")  # Disable lifespan events to reduce cold start time
+
+# Cache for Excel files to avoid repeated loading
+excel_cache = {}
+
+def load_excel_file(file_path):
+    """Load Excel file with caching to improve performance."""
+    if file_path in excel_cache:
+        print(f"Using cached data for {file_path}")
+        return excel_cache[file_path]
+    
+    print(f"Loading Excel file: {file_path}")
+    start_time = time.time()
+    
+    try:
+        # Read in smaller chunks with optimized settings for large files
+        df = pd.read_excel(
+            file_path,
+            engine='openpyxl',  # Use openpyxl engine for better performance
+            keep_default_na=False,  # Improves performance with large files
+        )
+        
+        # Convert all string columns to lowercase for faster case-insensitive searches
+        for col in df.columns:
+            if df[col].dtype == 'object':  # Only for string columns
+                try:
+                    df[col] = df[col].str.lower()
+                except:
+                    pass
+        
+        load_time = time.time() - start_time
+        print(f"Excel file loaded in {load_time:.2f} seconds")
+        
+        # Cache the dataframe
+        excel_cache[file_path] = df
+        return df
+    except Exception as e:
+        print(f"Error loading Excel file: {str(e)}")
+        # Return an empty DataFrame with some default columns if loading fails
+        empty_df = pd.DataFrame(columns=["college_name", "state", "category", "cr_2023_1"])
+        return empty_df
+
 @app.post("/find_colleges")
 def find_colleges(request: CollegeRequest):
     """Returns college names, states, and closing ranks based on user selection."""
+    start_time = time.time()
     state = request.state
-    category = request.category
+    category = request.category.lower()  # Lowercase for consistency
     round_num = request.round
     rank = request.rank
     
     print(f"Finding colleges for state: {state}, category: {category}, round: {round_num}, rank: {rank}")
+    
+    # Early exit with empty result if rank is too high (unlikely to match)
+    if rank > 1000000:
+        return {"colleges": [], "message": "Rank too high, no matching colleges found"}
     
     # All India may have more rounds
     max_rounds = 6 if state == "All India" else 3
@@ -255,10 +328,15 @@ def find_colleges(request: CollegeRequest):
         
         if not os.path.exists(file_path):
             print("Fallback file open.xlsx also not found")
-            raise HTTPException(status_code=400, detail="Dataset not found and no fallback available")
+            return {"colleges": [], "message": "Dataset not found and no fallback available"}
     
     try:
-        df = pd.read_excel(file_path)
+        # Use optimized file loading with caching
+        df = load_excel_file(file_path)
+        
+        if df.empty:
+            return {"colleges": [], "message": "Failed to load dataset"}
+            
         print(f"Columns in dataset: {df.columns.tolist()}")
         
         # Try different possible column name formats for rounds
@@ -296,22 +374,23 @@ def find_colleges(request: CollegeRequest):
                         break
             
             if not round_column:
-                raise HTTPException(status_code=400, detail=f"Round {round_num} data not found in dataset")
+                return {"colleges": [], "message": f"Round {round_num} data not found in dataset"}
         
         # Map common category names to actual values in the dataset
         category_mapping = {
-            "general": "Open",
-            "open": "Open",
-            "obc": "OBC",
-            "sc": "SC",
-            "st": "ST",
-            "ews": "EWS"
+            "general": "open",
+            "open": "open",
+            "obc": "obc",
+            "sc": "sc",
+            "st": "st",
+            "ews": "ews"
         }
         
         # Try to map the category to a known one, or use as is if not in mapping
-        mapped_category = category_mapping.get(category.lower(), category)
+        mapped_category = category_mapping.get(category, category)
         
         # Check if category column exists
+        filtered_df = None
         if "category" not in df.columns:
             print(f"Category column not found in {file_path}. Available columns: {df.columns.tolist()}")
             # Try to find alternative category column
@@ -320,22 +399,33 @@ def find_colleges(request: CollegeRequest):
             if alt_category_columns:
                 category_col = alt_category_columns[0]
                 print(f"Using alternative category column: {category_col}")
-                filtered_df = df[df[category_col].str.contains(mapped_category, case=False) & (df[round_column] >= rank)]
-                filtered_df = filtered_df.sort_values(by=round_column)
+                try:
+                    # Convert rank column to numeric to prevent string comparison errors
+                    df[round_column] = pd.to_numeric(df[round_column], errors='coerce')
+                    filtered_df = df[df[category_col].str.contains(mapped_category, case=False, na=False) & (df[round_column] >= rank)]
+                    filtered_df = filtered_df.sort_values(by=round_column).head(20)
+                except Exception as e:
+                    print(f"Error filtering by alternative category: {str(e)}")
+                    filtered_df = df.sort_values(by=round_column).head(20)
             else:
                 # If no category column, return all colleges sorted by closing rank
-                filtered_df = df.sort_values(by=round_column)
-                result = filtered_df.head(30)[["college_name", "state", round_column]].rename(columns={round_column: "closing_rank"}).to_dict(orient="records")
-                return {"colleges": result}
+                try:
+                    df[round_column] = pd.to_numeric(df[round_column], errors='coerce')
+                    filtered_df = df[df[round_column] >= rank].sort_values(by=round_column).head(20)
+                except Exception as e:
+                    print(f"Error filtering all colleges: {str(e)}")
+                    filtered_df = df.head(20)
         else:
             # Using case-insensitive comparison for category
             try:
-                filtered_df = df[df["category"].str.contains(mapped_category, case=False) & (df[round_column] >= rank)]
-                filtered_df = filtered_df.sort_values(by=round_column)
+                # Convert rank column to numeric to prevent string comparison errors
+                df[round_column] = pd.to_numeric(df[round_column], errors='coerce')
+                filtered_df = df[df["category"].str.contains(mapped_category, case=False, na=False) & (df[round_column] >= rank)]
+                filtered_df = filtered_df.sort_values(by=round_column).head(20)
             except Exception as e:
                 print(f"Error filtering by category: {str(e)}")
                 # If filtering fails, return all colleges sorted by closing rank
-                filtered_df = df[df[round_column] >= rank].sort_values(by=round_column)
+                filtered_df = df[df[round_column] >= rank].sort_values(by=round_column).head(20)
         
         # Make sure college_name and state columns exist, use defaults if not
         columns_to_return = []
@@ -364,17 +454,21 @@ def find_colleges(request: CollegeRequest):
         columns_to_return.append(round_column)
         rename_dict[round_column] = "closing_rank"
         
+        # Ensure we only include columns that exist in the dataframe
+        columns_to_return = [col for col in columns_to_return if col in filtered_df.columns]
+        
         # Limit to 20 colleges max
         result = filtered_df[columns_to_return].rename(columns=rename_dict).head(20).to_dict(orient="records")
+        
+        end_time = time.time() - start_time
+        print(f"Colleges query processed in {end_time:.2f} seconds")
+        
         return {"colleges": result}
         
     except Exception as e:
         print(f"Error processing colleges request: {str(e)}")
-        raise HTTPException(status_code=400, detail=f"Error processing request: {str(e)}")
+        return {"colleges": [], "message": f"Error processing request: {str(e)}"}
 
-# Create Lambda handler
-handler = Mangum(app)
-
-#if __name__ == '__main__':
-#    import uvicorn
-#    uvicorn.run(app, host="0.0.0.0", port=8081) 
+if __name__ == '__main__':
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8081) 
