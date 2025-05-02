@@ -1,14 +1,14 @@
-FROM public.ecr.aws/lambda/python:3.9
+FROM python:3.11-slim
+
+WORKDIR /app
 
 COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Force reinstall pydantic with its binary dependencies
-RUN pip install --upgrade pip && \
-    pip install --force-reinstall pydantic==2.0.3 pydantic-core==2.3.0 && \
-    pip install -r requirements.txt --target "${LAMBDA_TASK_ROOT}"
+COPY . .
 
-COPY main.py ${LAMBDA_TASK_ROOT}/
-COPY Corrected_Marks_vs_Rank.xlsx ${LAMBDA_TASK_ROOT}/
-COPY cleaned_data/ ${LAMBDA_TASK_ROOT}/cleaned_data/
+# Port that the container will listen on
+EXPOSE 8080
 
-CMD ["main.handler"] 
+# Use Gunicorn as the production server with Uvicorn workers
+CMD ["gunicorn", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8080", "main:app"] 

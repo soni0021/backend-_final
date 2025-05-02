@@ -6,7 +6,6 @@ from typing import List, Optional, Dict, Any, Union
 import pandas as pd
 import os
 import numpy as np
-from mangum import Mangum
 import time
 
 app = FastAPI(title="NEET Rank Predictor API")
@@ -19,17 +18,6 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type"],
 )
-@app.middleware("http")
-async def remove_stage_prefix(request: Request, call_next):
-    # Remove stage prefix from path if present (like /dev/ or /prod/)
-    path = request.url.path
-    if path.startswith('/dev/'):
-        request.scope["path"] = path.replace('/dev', '', 1)
-    elif path.startswith('/prod/'):
-        request.scope["path"] = path.replace('/prod', '', 1)
-    
-    response = await call_next(request)
-    return response
 
 # Define separate paths for rank prediction and state datasets
 rank_file_path = "./Corrected_Marks_vs_Rank.xlsx"  # Rank vs Marks file
@@ -71,7 +59,7 @@ STATE_TO_FILE_MAP = {
 }
 
 # List of all Indian states
-STATES_LIST = ["Andhra Pradesh", "Arunachal Pradesh", "Assam", "Bihar", "Chhattisgarh", "Goa", "Gujarat", "Haryana", "Himachal Pradesh", "Jharkhand", "Karnataka", "Kerala", "Madhya Pradesh", "Maharashtra", "Manipur", "Meghalaya", "Mizoram", "Nagaland", "Odisha", "Punjab", "Rajasthan", "Sikkim", "Tamil Nadu", "Telangana", "Tripura", "Uttar Pradesh", "Uttarakhand", "West Bengal"]
+STATES_LIST = ["Andhra Pradesh", "Arunachal Pradesh", "Assam", "Bihar", "Chhattisgarh", "Goa", "Gujarat", "Haryana", "Himachal Pradesh", "Jharkhand", "Karnataka", "Kerala", "Madhya Pradesh", "Maharashtra", "Manipur", "Meghalaya", "Mizoram", "Nagaland", "Odisha", "Punjab", "Rajasthan", "Sikkim", "Tamil Nadu", "Telangana", "Tripura", "Uttar Pradesh", "Uttarakhand", "West Bengal", "All India", "Jammu and Kashmir", "Delhi", "Chandigarh", "Pondicherry"]
 
 def predict_rank(marks, category):
     """Predicts NEET rank based on marks & category adjustments."""
@@ -239,9 +227,6 @@ def get_categories(request: StateRequest):
         print(f"Returning default categories: {default_categories}")
         return {"categories": default_categories}
 
-# Create Lambda handler with better configuration
-handler = Mangum(app, lifespan="off")  # Disable lifespan events to reduce cold start time
-
 # Cache for Excel files to avoid repeated loading
 excel_cache = {}
 
@@ -403,29 +388,29 @@ def find_colleges(request: CollegeRequest):
                     # Convert rank column to numeric to prevent string comparison errors
                     df[round_column] = pd.to_numeric(df[round_column], errors='coerce')
                     filtered_df = df[df[category_col].str.contains(mapped_category, case=False, na=False) & (df[round_column] >= rank)]
-                    filtered_df = filtered_df.sort_values(by=round_column).head(20)
+                    filtered_df = filtered_df.sort_values(by=round_column)
                 except Exception as e:
                     print(f"Error filtering by alternative category: {str(e)}")
-                    filtered_df = df.sort_values(by=round_column).head(20)
+                    filtered_df = df.sort_values(by=round_column)
             else:
                 # If no category column, return all colleges sorted by closing rank
                 try:
                     df[round_column] = pd.to_numeric(df[round_column], errors='coerce')
-                    filtered_df = df[df[round_column] >= rank].sort_values(by=round_column).head(20)
+                    filtered_df = df[df[round_column] >= rank].sort_values(by=round_column)
                 except Exception as e:
                     print(f"Error filtering all colleges: {str(e)}")
-                    filtered_df = df.head(20)
+                    filtered_df = df.sort_values(by=round_column)
         else:
             # Using case-insensitive comparison for category
             try:
                 # Convert rank column to numeric to prevent string comparison errors
                 df[round_column] = pd.to_numeric(df[round_column], errors='coerce')
                 filtered_df = df[df["category"].str.contains(mapped_category, case=False, na=False) & (df[round_column] >= rank)]
-                filtered_df = filtered_df.sort_values(by=round_column).head(20)
+                filtered_df = filtered_df.sort_values(by=round_column)
             except Exception as e:
                 print(f"Error filtering by category: {str(e)}")
                 # If filtering fails, return all colleges sorted by closing rank
-                filtered_df = df[df[round_column] >= rank].sort_values(by=round_column).head(20)
+                filtered_df = df[df[round_column] >= rank].sort_values(by=round_column)
         
         # Make sure college_name and state columns exist, use defaults if not
         columns_to_return = []
@@ -458,7 +443,7 @@ def find_colleges(request: CollegeRequest):
         columns_to_return = [col for col in columns_to_return if col in filtered_df.columns]
         
         # Limit to 20 colleges max
-        result = filtered_df[columns_to_return].rename(columns=rename_dict).head(20).to_dict(orient="records")
+        result = filtered_df[columns_to_return].rename(columns=rename_dict).head(100).to_dict(orient="records")
         
         end_time = time.time() - start_time
         print(f"Colleges query processed in {end_time:.2f} seconds")
@@ -471,4 +456,5 @@ def find_colleges(request: CollegeRequest):
 
 if __name__ == '__main__':
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8081) 
+    # Configure for production use on EC2
+    uvicorn.run(app, host="0.0.0.0", port=8080) 
